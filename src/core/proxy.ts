@@ -44,6 +44,27 @@ export interface ProxyArrayState extends ProxyBaseState {
 	draft_: Drafted<AnyArray, ProxyArrayState>
 	operationMethod?: string
 	allIndicesReassigned_?: boolean
+	/**
+	 * Records the original (base) index of base elements that have been
+	 * relocated to a different slot in the copy by an array-methods-plugin
+	 * operation (sort, reverse, splice, shift/unshift).
+	 *
+	 * A slot holding a recorded value contains an original base element even
+	 * though the same-index slot in the base array holds something else. The
+	 * proxy `get` trap consults this map to create (or reuse) a draft for such
+	 * a moved element keyed at its *original* base index, instead of handing
+	 * out the raw base object (which would let user mutations escape into the
+	 * original state). The stale key also suppresses per-field child patches,
+	 * since the parent array emits index-level replace patches for the
+	 * reordering.
+	 */
+	movedElements_?: Map<any, number>
+	/**
+	 * Canonical drafts created for moved base elements, keyed by the base
+	 * value itself, so that the same base object is always represented by the
+	 * same draft no matter how many slots it (temporarily) occupies.
+	 */
+	movedElementDrafts_?: Map<any, any>
 }
 
 type ProxyState = ProxyObjectState | ProxyArrayState
@@ -129,6 +150,28 @@ export const objectTraps: ProxyHandler<ProxyState> = {
 		const value = source[prop]
 		if (state.finalized_ || !isDraftable(value)) {
 			return value
+		}
+
+		// Reordering/shifting array methods (sort, reverse, splice, shift/unshift)
+		// can leave a base element at a different slot than the one it occupied in
+		// the base array. Such a moved element must still be drafted on access,
+		// otherwise the raw base object escapes the draft and mutations leak into
+		// the original state. Reuse a canonical draft when the same base element
+		// was already drafted through another slot.
+		if (isArrayWithStringProp && isArrayIndex(prop)) {
+			const arrayState = state as ProxyArrayState
+			const originalIndex = arrayState.movedElements_?.get(value)
+			if (originalIndex !== undefined) {
+				let childDraft = arrayState.movedElementDrafts_?.get(value)
+				if (!childDraft) {
+					// Register the draft at the element's original base index, like
+					// drafts created during a proxy-driven sort, so that child patches
+					// are suppressed in favour of the parent's index-level patches.
+					childDraft = createProxy(state.scope_, value, state, originalIndex)
+					;(arrayState.movedElementDrafts_ ??= new Map()).set(value, childDraft)
+				}
+				return (state.copy_![+(prop as string)] = childDraft)
+			}
 		}
 
 		// During mutating array operations, defer proxy creation for array elements

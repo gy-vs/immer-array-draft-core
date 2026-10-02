@@ -5,7 +5,9 @@ import {
 	markChanged,
 	prepareCopy,
 	handleCrossReference,
-	ProxyArrayState
+	ProxyArrayState,
+	isDraft,
+	isDraftable
 } from "../internal"
 
 /**
@@ -183,6 +185,56 @@ export function enableArrayMethods() {
 		state.allIndicesReassigned_ = true
 	}
 
+	/**
+	 * Records base elements that ended up in a slot different from (or
+	 * additional to) the one they occupied in the base array, after a
+	 * reordering/shifting operation (reverse, sort, splice, shift/unshift).
+	 *
+	 * `state.copy_` holds the post-operation order; elements that are still
+	 * raw (non-draft) draftable values from the base must be recorded, so
+	 * that later indexed access drafts them instead of returning the raw
+	 * base object. Without this, a mutation like
+	 * `draft.items[0].mark = true` after a sort would mutate the original
+	 * state and corrupt patches.
+	 *
+	 * Elements already represented by a proxy (drafted before the operation)
+	 * are skipped: the proxy itself stays valid wherever it lands.
+	 */
+	function recordMovedBaseElements(state: ProxyArrayState) {
+		const {base_, copy_} = state
+		if (!copy_) return
+		// First pass: find slots that hold a raw draftable value which is no
+		// longer at its original slot (the generic get-trap heuristic
+		// `base_[i] === copy_[i]` would fail for them).
+		let moved: Array<{value: any; index: number}> | undefined
+		for (let i = 0; i < copy_.length; i++) {
+			const value = copy_[i]
+			if (isDraftable(value) && !isDraft(value) && base_[i] !== value) {
+				;(moved ??= []).push({value, index: i})
+			}
+		}
+		if (!moved) return
+
+		// Resolve the original base index of every candidate, so that user
+		// inserted values (which do not originate from the base) are excluded:
+		// assigned values are never drafted.
+		let originalIndex: Map<any, number> | undefined
+		for (const {value, index} of moved) {
+			if (originalIndex === undefined) {
+				originalIndex = new Map()
+				for (let j = 0; j < base_.length; j++) {
+					const baseValue = base_[j]
+					if (isDraftable(baseValue) && !isDraft(baseValue))
+						originalIndex.set(baseValue, j)
+				}
+			}
+			const baseIndex = originalIndex.get(value)
+			if (baseIndex !== undefined && baseIndex !== index) {
+				;(state.movedElements_ ??= new Map()).set(value, baseIndex)
+			}
+		}
+	}
+
 	function normalizeSliceIndex(index: number, length: number): number {
 		if (index < 0) {
 			return Math.max(length + index, 0)
@@ -238,6 +290,7 @@ export function enableArrayMethods() {
 			// Handle index reassignment for shifting methods
 			if (SHIFTING_METHODS.has(method as MutatingArrayMethod)) {
 				markAllIndicesReassigned(state)
+				recordMovedBaseElements(state)
 			}
 
 			// Handle cross-references for newly inserted values.
@@ -274,6 +327,7 @@ export function enableArrayMethods() {
 			() => {
 				;(state.copy_! as any)[method](...args)
 				markAllIndicesReassigned(state)
+				recordMovedBaseElements(state)
 				return state.draft_
 			},
 			false
@@ -322,6 +376,7 @@ export function enableArrayMethods() {
 							state.copy_!.splice(...(args as [number, number, ...any[]]))
 						)
 						markAllIndicesReassigned(state)
+						recordMovedBaseElements(state)
 						// Handle cross-references for inserted values (args from index 2+)
 						if (args.length > 2) {
 							const startIndex = normalizeSliceIndex(
