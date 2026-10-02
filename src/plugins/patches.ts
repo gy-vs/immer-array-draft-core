@@ -52,7 +52,21 @@ export function enablePatches() {
 		if (state.key_ !== undefined) {
 			// Step 2: Validate the key is still valid in parent
 
-			const parentCopy = state.parent_!.copy_ ?? state.parent_!.base_
+			const parent = state.parent_!
+			// If the parent is an array whose indices were all reassigned (e.g.
+			// by sort/reverse/splice/shift/unshift through the array methods
+			// plugin), the parent emits a replace patch for every index that
+			// differs from the base. Those replace patches fully capture this
+			// child's changes, so the child must not emit its own patches -
+			// they would duplicate (and could conflict with) the parent's.
+			if (
+				parent.type_ === ArchType.Array &&
+				(parent as ProxyArrayState).allIndicesReassigned_
+			) {
+				return null
+			}
+
+			const parentCopy = parent.copy_ ?? parent.base_
 			const proxyDraft = getProxyDraft(get(parentCopy, state.key_!))
 			const valueAtKey = get(parentCopy, state.key_!)
 

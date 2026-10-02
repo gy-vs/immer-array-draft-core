@@ -46,7 +46,7 @@
       "pre-commit": "pretty-quick --staged"
     }
   },
-
+  "repository": {
     "type": "git",
     "url": "https://github.com/immerjs/immer.git"
   },
@@ -61,7 +61,7 @@
     "type": "opencollective",
     "url": "https://opencollective.com/immer"
   },
-
+  "bugs": {
     "url": "https://github.com/immerjs/immer/issues"
   },
 

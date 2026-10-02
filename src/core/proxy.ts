@@ -22,7 +22,8 @@ import {
 	ENUMERABLE,
 	VALUE,
 	isArray,
-	isArrayIndex
+	isArrayIndex,
+	isDraft
 } from "../internal"
 
 interface ProxyBaseState extends ImmerBaseState {
@@ -44,6 +45,13 @@ export interface ProxyArrayState extends ProxyBaseState {
 	draft_: Drafted<AnyArray, ProxyArrayState>
 	operationMethod?: string
 	allIndicesReassigned_?: boolean
+	/**
+	 * Lazily built set of the base array's elements, used to detect values in
+	 * `copy_` that are still owned by the original state after reordering
+	 * operations (sort/reverse/splice/shift/unshift) moved them around.
+	 * `base_` never changes for a state, so this can be cached safely.
+	 */
+	baseElements_?: Set<any>
 }
 
 type ProxyState = ProxyObjectState | ProxyArrayState
@@ -150,6 +158,26 @@ export const objectTraps: ProxyHandler<ProxyState> = {
 			prepareCopy(state)
 			// Ensure array keys are always numbers
 			const childKey = state.type_ === ArchType.Array ? +(prop as string) : prop
+			const childDraft = createProxy(state.scope_, value, state, childKey)
+
+			return (state.copy_![childKey] = childDraft)
+		}
+		// After operations that shift or reorder elements (splice, shift,
+		// unshift, sort, reverse), the copy can hold base elements at indices
+		// that no longer correspond to the base array. Those values are still
+		// owned by the original state, so they must be drafted on access -
+		// otherwise mutations would bypass the draft and leak into the
+		// original state. Values assigned by the user (which are not part of
+		// the base array) keep the existing "assigned values are not drafted"
+		// semantics.
+		if (
+			isArrayWithStringProp &&
+			(state as ProxyArrayState).allIndicesReassigned_ &&
+			isArrayIndex(prop) &&
+			!isDraft(value) &&
+			isBaseElement(state as ProxyArrayState, value)
+		) {
+			const childKey = +(prop as string)
 			const childDraft = createProxy(state.scope_, value, state, childKey)
 
 			return (state.copy_![childKey] = childDraft)
@@ -286,6 +314,20 @@ function peek(draft: Drafted, prop: PropertyKey) {
 	const state = draft[DRAFT_STATE]
 	const source = state ? latest(state) : draft
 	return source[prop]
+}
+
+/**
+ * Returns true if `value` is one of the elements of the state's base array,
+ * i.e. it is owned by the original state and must be drafted before it can
+ * be mutated safely. The lookup set is cached on the state; `base_` never
+ * changes, so the cache stays valid for the state's lifetime.
+ */
+function isBaseElement(state: ProxyArrayState, value: any): boolean {
+	let elements = state.baseElements_
+	if (!elements) {
+		elements = state.baseElements_ = new Set(state.base_)
+	}
+	return elements.has(value)
 }
 
 function readPropFromProto(state: ImmerState, source: any, prop: PropertyKey) {
